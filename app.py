@@ -1,247 +1,542 @@
-import os
-import json
-from dotenv import load_dotenv
-from google import genai
-from google.genai import types
+import streamlit as st
+import pandas as pd
 
-load_dotenv()
+from database import (
+    initialize_database,
+    add_observation,
+    get_observations,
+)
 
-API_KEY = os.getenv("GEMINI_API_KEY")
+from ai_engine import (
+    analyze_observation,
+    generate_trend_summary,
+    generate_session_brief,
+)
 
-if not API_KEY:
-    raise ValueError(
-        "GEMINI_API_KEY not found. Create a .env file with your API key."
+from analytics import build_analytics_data
+
+
+st.set_page_config(
+    page_title="AutiTrack AI",
+    page_icon="🧩",
+    layout="wide",
+)
+
+
+initialize_database()
+
+
+st.title("🧩 AutiTrack AI")
+
+st.caption(
+    "AI-assisted developmental observation tracking "
+    "and longitudinal pattern summarization."
+)
+
+st.warning(
+    "AutiTrack AI is an observation-support tool. "
+    "It does not diagnose autism or any medical condition."
+)
+
+
+# --------------------------------------------------
+# Sidebar
+# --------------------------------------------------
+
+st.sidebar.title("Navigation")
+
+page = st.sidebar.radio(
+    "Go to",
+    [
+        "Add Observation",
+        "Dashboard",
+        "AI Session Brief",
+    ]
+)
+
+
+# --------------------------------------------------
+# ADD OBSERVATION
+# --------------------------------------------------
+
+if page == "Add Observation":
+
+    st.header("Add Observation")
+
+    date = st.date_input(
+        "Observation Date"
     )
 
-client = genai.Client(api_key=API_KEY)
+    observation = st.text_area(
+        "Observation",
+        placeholder=(
+            "Example: During playtime, the child "
+            "joined another child and participated "
+            "in the game."
+        ),
+        height=150,
+    )
 
-MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+    context = st.selectbox(
+        "Context",
+        [
+            "Home",
+            "School",
+            "Playground",
+            "Therapy Session",
+            "Community",
+            "Other",
+        ]
+    )
 
-DOMAINS = [
-    "Communication",
-    "Social Interaction",
-    "Sensory",
-    "Routine",
-    "Behavior",
-    "Daily Activity",
-]
+    activity = st.text_input(
+        "Activity",
+        placeholder="Example: Group play"
+    )
+
+    if st.button(
+        "Analyze Observation",
+        type="primary"
+    ):
+
+        if not observation.strip():
+
+            st.error(
+                "Please enter an observation."
+            )
+
+        else:
+
+            with st.spinner(
+                "Analyzing observation..."
+            ):
+
+                result = analyze_observation(
+                    observation_text=observation,
+                    context=context,
+                    activity=activity,
+                )
+
+            if "error" in result:
+
+                st.error(
+                    result["error"]
+                )
+
+                if "raw_response" in result:
+                    st.code(
+                        result["raw_response"]
+                    )
+
+            else:
+
+                st.success(
+                    "Observation analyzed successfully."
+                )
+
+                st.subheader(
+                    "AI Analysis"
+                )
+
+                st.write(
+                    "**Domains:**"
+                )
+
+                st.write(
+                    ", ".join(
+                        result.get(
+                            "domains",
+                            []
+                        )
+                    )
+                )
+
+                st.write(
+                    "**Observed Behavior:**"
+                )
+
+                for behavior in result.get(
+                    "observed_behavior",
+                    []
+                ):
+                    st.write(
+                        f"- {behavior}"
+                    )
+
+                st.write(
+                    "**Trigger / Context:**"
+                )
+
+                st.write(
+                    result.get(
+                        "trigger"
+                    ) or "Not specified"
+                )
+
+                st.write(
+                    "**Summary:**"
+                )
+
+                st.info(
+                    result.get(
+                        "summary",
+                        ""
+                    )
+                )
+
+                if st.button(
+                    "Save Observation"
+                ):
+
+                    add_observation(
+                        date=str(date),
+                        observation=observation,
+                        context=context,
+                        activity=activity,
+                        domains=result.get(
+                            "domains",
+                            []
+                        ),
+                        observed_behavior=result.get(
+                            "observed_behavior",
+                            []
+                        ),
+                        trigger=result.get(
+                            "trigger"
+                        ),
+                        summary=result.get(
+                            "summary",
+                            ""
+                        ),
+                    )
+
+                    st.success(
+                        "Observation saved."
+                    )
 
 
-def analyze_observation(
-    observation_text,
-    context=None,
-    activity=None
-):
-    """
-    Analyze one caregiver observation.
+# --------------------------------------------------
+# DASHBOARD
+# --------------------------------------------------
 
-    This function organizes an observation into predefined domains.
-    It does NOT diagnose autism or any medical condition.
-    """
+elif page == "Dashboard":
 
-    if not observation_text or not observation_text.strip():
-        return {
-            "error": "Observation text cannot be empty."
-        }
+    st.header(
+        "Observation Dashboard"
+    )
 
-    context = context or "Not specified"
-    activity = activity or "Not specified"
+    rows, columns = get_observations()
 
-    prompt = f"""
-You are an AI observation-analysis assistant for a developmental
-observation tracking application called AutiTrack AI.
+    df = pd.DataFrame(
+        rows,
+        columns=columns
+    )
 
-Your job is ONLY to organize the supplied observation.
+    if df.empty:
 
-Allowed domains:
-{DOMAINS}
-
-Observation:
-{observation_text}
-
-Context:
-{context}
-
-Activity:
-{activity}
-
-Return JSON with exactly these fields:
-
-{{
-    "domains": [],
-    "observed_behavior": [],
-    "trigger": null,
-    "summary": ""
-}}
-
-Rules:
-
-1. Select one or more relevant domains from the allowed domains.
-2. Extract only behaviors explicitly described in the observation.
-3. If a trigger/context is explicitly mentioned, summarize it.
-4. If no trigger is mentioned, use null.
-5. Keep the summary neutral and concise.
-6. Do NOT diagnose autism.
-7. Do NOT diagnose any medical or developmental condition.
-8. Do NOT recommend treatment.
-9. Do NOT invent information.
-10. Do NOT compare this child with other children.
-11. Do NOT infer causes that are not explicitly stated.
-12. Return ONLY valid JSON.
-"""
-
-    try:
-        response = client.models.generate_content(
-            model=MODEL_NAME,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json"
-            ),
+        st.info(
+            "No observations recorded yet."
         )
 
-        result = json.loads(response.text)
+    else:
 
-        required_fields = [
+        st.subheader(
+            "Recorded Observations"
+        )
+
+        display_columns = [
+            "date",
+            "context",
+            "activity",
             "domains",
-            "observed_behavior",
-            "trigger",
             "summary",
         ]
 
-        for field in required_fields:
-            if field not in result:
-                result[field] = None
-
-        return result
-
-    except json.JSONDecodeError:
-        return {
-            "error": "AI returned invalid JSON.",
-            "raw_response": response.text if response else ""
-        }
-
-    except Exception as e:
-        return {
-            "error": str(e)
-        }
-
-
-def generate_trend_summary(analytics_data):
-    """
-    Generate a neutral summary from already-calculated
-    longitudinal analytics.
-    """
-
-    prompt = f"""
-You are an AI assistant for AutiTrack AI.
-
-Summarize the following longitudinal observation analytics.
-
-Analytics data:
-{json.dumps(analytics_data, indent=2)}
-
-Return JSON:
-
-{{
-    "summary": "",
-    "notable_changes": [],
-    "context_patterns": [],
-    "discussion_topics": []
-}}
-
-Rules:
-
-1. Describe recorded patterns neutrally.
-2. Do not diagnose any condition.
-3. Do not recommend treatment.
-4. Do not infer unsupported causes.
-5. Do not compare children.
-6. Do not describe a change as inherently good or bad.
-7. Use only information present in the supplied data.
-8. Discussion topics should be suitable for discussion with a qualified professional.
-9. Return ONLY valid JSON.
-"""
-
-    try:
-        response = client.models.generate_content(
-            model=MODEL_NAME,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json"
-            ),
+        st.dataframe(
+            df[display_columns],
+            use_container_width=True,
         )
 
-        return json.loads(response.text)
+        st.divider()
 
-    except Exception as e:
-        return {
-            "error": str(e)
-        }
-
-
-def generate_session_brief(session_data):
-    """
-    Generate a concise professional discussion brief.
-    """
-
-    prompt = f"""
-You are an AI assistant for AutiTrack AI.
-
-Create a concise session brief from the supplied observation data.
-
-Session data:
-{json.dumps(session_data, indent=2)}
-
-Return JSON:
-
-{{
-    "observation_overview": "",
-    "recent_changes": [],
-    "contextual_patterns": [],
-    "notable_observations": [],
-    "discussion_points": []
-}}
-
-Rules:
-
-1. Summarize recorded observations only.
-2. Do not diagnose autism.
-3. Do not diagnose any medical or developmental condition.
-4. Do not provide treatment recommendations.
-5. Do not make clinical conclusions.
-6. Do not invent information.
-7. Do not infer unsupported causal relationships.
-8. Do not compare children.
-9. Keep language neutral.
-10. Discussion points should simply identify observations
-   that may be discussed with a qualified professional.
-11. Return ONLY valid JSON.
-"""
-
-    try:
-        response = client.models.generate_content(
-            model=MODEL_NAME,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json"
-            ),
+        st.subheader(
+            "Personal Baseline"
         )
 
-        return json.loads(response.text)
+        analytics_data = build_analytics_data(
+            df
+        )
 
-    except Exception as e:
-        return {
-            "error": str(e)
-        }
+        baseline = analytics_data[
+            "baseline"
+        ]
+
+        recent = analytics_data[
+            "recent"
+        ]
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+
+            st.write(
+                "Historical Observation Counts"
+            )
+
+            st.bar_chart(
+                pd.Series(baseline)
+            )
+
+        with col2:
+
+            st.write(
+                "Recent Observation Counts"
+            )
+
+            st.bar_chart(
+                pd.Series(recent)
+            )
+
+        st.subheader(
+            "Context Patterns"
+        )
+
+        patterns = analytics_data[
+            "context_patterns"
+        ]
+
+        if patterns:
+
+            pattern_df = pd.DataFrame(
+                patterns
+            )
+
+            st.dataframe(
+                pattern_df,
+                use_container_width=True,
+            )
+
+        else:
+
+            st.info(
+                "No context patterns available."
+            )
+
+        st.divider()
+
+        st.subheader(
+            "AI Trend Summary"
+        )
+
+        if st.button(
+            "Generate Trend Summary"
+        ):
+
+            with st.spinner(
+                "Generating summary..."
+            ):
+
+                result = generate_trend_summary(
+                    analytics_data
+                )
+
+            if "error" in result:
+
+                st.error(
+                    result["error"]
+                )
+
+            else:
+
+                st.write(
+                    result.get(
+                        "summary",
+                        ""
+                    )
+                )
+
+                if result.get(
+                    "notable_changes"
+                ):
+
+                    st.write(
+                        "**Notable Changes**"
+                    )
+
+                    for item in result[
+                        "notable_changes"
+                    ]:
+
+                        st.write(
+                            f"- {item}"
+                        )
+
+                if result.get(
+                    "context_patterns"
+                ):
+
+                    st.write(
+                        "**Context Patterns**"
+                    )
+
+                    for item in result[
+                        "context_patterns"
+                    ]:
+
+                        st.write(
+                            f"- {item}"
+                        )
+
+                if result.get(
+                    "discussion_topics"
+                ):
+
+                    st.write(
+                        "**Discussion Topics**"
+                    )
+
+                    for item in result[
+                        "discussion_topics"
+                    ]:
+
+                        st.write(
+                            f"- {item}"
+                        )
 
 
-def test_ai():
-    """Simple API connectivity test."""
+# --------------------------------------------------
+# SESSION BRIEF
+# --------------------------------------------------
 
-    response = client.models.generate_content(
-        model=MODEL_NAME,
-        contents="Respond with exactly: AutiTrack AI is working."
+elif page == "AI Session Brief":
+
+    st.header(
+        "AI Professional Session Brief"
     )
 
-    return response.text
-  
+    rows, columns = get_observations()
+
+    df = pd.DataFrame(
+        rows,
+        columns=columns
+    )
+
+    if df.empty:
+
+        st.info(
+            "Add observations first."
+        )
+
+    else:
+
+        analytics_data = build_analytics_data(
+            df
+        )
+
+        session_data = {
+            "observations": df[
+                [
+                    "date",
+                    "context",
+                    "activity",
+                    "domains",
+                    "observed_behavior",
+                    "summary",
+                ]
+            ].to_dict(
+                orient="records"
+            ),
+            "analytics": analytics_data,
+        }
+
+        if st.button(
+            "Generate Session Brief",
+            type="primary"
+        ):
+
+            with st.spinner(
+                "Generating session brief..."
+            ):
+
+                result = generate_session_brief(
+                    session_data
+                )
+
+            if "error" in result:
+
+                st.error(
+                    result["error"]
+                )
+
+            else:
+
+                st.subheader(
+                    "Observation Overview"
+                )
+
+                st.write(
+                    result.get(
+                        "observation_overview",
+                        ""
+                    )
+                )
+
+                st.subheader(
+                    "Recent Changes"
+                )
+
+                for item in result.get(
+                    "recent_changes",
+                    []
+                ):
+
+                    st.write(
+                        f"- {item}"
+                    )
+
+                st.subheader(
+                    "Contextual Patterns"
+                )
+
+                for item in result.get(
+                    "contextual_patterns",
+                    []
+                ):
+
+                    st.write(
+                        f"- {item}"
+                    )
+
+                st.subheader(
+                    "Notable Observations"
+                )
+
+                for item in result.get(
+                    "notable_observations",
+                    []
+                ):
+
+                    st.write(
+                        f"- {item}"
+                    )
+
+                st.subheader(
+                    "Discussion Points"
+                )
+
+                for item in result.get(
+                    "discussion_points",
+                    []
+                ):
+
+                    st.write(
+                        f"- {item}"
+                    )
+
+                st.divider()
+
+                st.caption(
+                    "This brief summarizes recorded observations "
+                    "for discussion with a qualified professional. "
+                    "It is not a diagnosis."
+                )
